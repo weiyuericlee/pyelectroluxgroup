@@ -72,3 +72,7 @@ class TokenManager(ABC):
         except jwt.ExpiredSignatureError as e:
             _LOGGER.error("Access Token is invalid - %s", e)
             return False
+        except jwt.DecodeError:
+            # Token is empty or malformed (e.g. cleared to force a refresh).
+            # Return False so async_get_access_token() performs a normal refresh.
+            return False
