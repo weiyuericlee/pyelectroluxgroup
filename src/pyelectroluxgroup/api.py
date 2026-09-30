@@ -75,18 +75,14 @@ class ElectroluxHubAPI:
         import asyncio
 
         import aiohttp
+        
+        retry_delay = 10
 
         while True:
             try:
                 stream_data = await self.async_get_livestream_configurations()
                 stream_url = stream_data["url"]
 
-                # Force a fresh token before opening the SSE connection.
-                # EventSource bakes the Bearer token into its headers once on
-                # open and never refreshes them. Without this, a long-lived
-                # stream will hit a 401 when the token expires (~12h), which
-                # was the observed pattern in production logs.
-                self.token_manager._access_token = ""
                 headers = await self.auth.get_headers()
 
                 # Cap each connection to 50 minutes (3000s) so the token is
@@ -99,6 +95,7 @@ class ElectroluxHubAPI:
                     headers=headers,
                     timeout=timeout,
                 ) as event_source:
+                    retry_delay = 10  # Reset delay on successful connection
                     async for event in event_source:
                         if not event.data:
                             continue
@@ -125,6 +122,7 @@ class ElectroluxHubAPI:
                     _LOGGER.warning(
                         "Live stream auth error, token will be refreshed on next attempt"
                     )
+                    self.token_manager._access_token = ""
                 else:
                     _LOGGER.debug(f"Live stream request error: {e}")
             except (aiohttp.ClientError, ConnectionError, asyncio.TimeoutError) as e:
@@ -133,6 +131,11 @@ class ElectroluxHubAPI:
                 if type(e).__name__ == "BreakLoopException":
                     raise e
                 _LOGGER.error(f"Live stream unexpected error: {e}")
+                if "429" in str(e):
+                    retry_delay = max(retry_delay, 300)  # Backoff to 5 min on rate limit
 
-            _LOGGER.debug("Reconnecting to live stream in 10 seconds...")
-            await asyncio.sleep(10)
+            if retry_delay < 300:
+                retry_delay = min(retry_delay * 2, 300)  # Exponential backoff up to 5 min
+
+            _LOGGER.debug(f"Reconnecting to live stream in {retry_delay} seconds...")
+            await asyncio.sleep(retry_delay)
