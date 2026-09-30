@@ -81,8 +81,17 @@ class ElectroluxHubAPI:
                 stream_data = await self.async_get_livestream_configurations()
                 stream_url = stream_data["url"]
 
+                # Force a fresh token before opening the SSE connection.
+                # EventSource bakes the Bearer token into its headers once on
+                # open and never refreshes them. Without this, a long-lived
+                # stream will hit a 401 when the token expires (~12h), which
+                # was the observed pattern in production logs.
+                self.token_manager._access_token = ""
                 headers = await self.auth.get_headers()
-                timeout = aiohttp.ClientTimeout(total=None, sock_read=120)
+
+                # Cap each connection to 50 minutes (3000s) so the token is
+                # always refreshed well before its typical ~60-min expiry.
+                timeout = aiohttp.ClientTimeout(total=3000, sock_read=120)
 
                 async with EventSource(
                     stream_url,
